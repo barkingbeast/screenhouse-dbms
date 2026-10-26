@@ -38,7 +38,12 @@ http.createServer(async(req,res)=>{
  if(req.method==='GET'&&path==='/api/review')return send(res,200,queries);
  if(req.method==='POST'&&path==='/api/query'){
    const b=await body(req);if(typeof b.sql!=='string'||!/^\s*(SELECT|WITH|EXPLAIN)\b/i.test(b.sql))return send(res,400,{error:'The review console accepts a single SELECT, WITH, or EXPLAIN query. Use psql for INSERT or booking functions.'});
-   const client=await pool.connect();try{await client.query('BEGIN READ ONLY');await client.query("SET LOCAL statement_timeout='2500ms'");const result=await client.query({text:b.sql,queryMode:'extended'});await client.query('ROLLBACK');return send(res,200,{rows:result.rows.slice(0,200),fields:result.fields.map(x=>x.name),rowCount:result.rowCount});}finally{await client.query('ROLLBACK');client.release();}
+   const client=await pool.connect();try{await client.query('BEGIN READ ONLY');await client.query("SET LOCAL statement_timeout='2500ms'");const result=await client.query({text:b.sql,queryMode:'extended'});await client.query('ROLLBACK');return send(res,200,{rows:result.rows.slice(0,200),fields:result.fields.map(x=>x.name),rowCount:result.rowCount});}
+   catch(e){
+     if(e.code==='42P01')return send(res,400,{error:e.message.includes('"customer"')?'The table "customer" does not exist. Use "customers" (plural): SELECT * FROM customers;':e.message+'. Check table names using the "Inspect table columns" example.',code:e.code});
+     if(e.code?.startsWith('42'))return send(res,400,{error:e.message,code:e.code});
+     throw e;
+   }finally{try{await client.query('ROLLBACK');}finally{client.release();}}
  }
  send(res,404,{error:'Not found'});
  }catch(e){console.error(e.code||'',e.message);const known=['P0001','23505','23514','23502','22P02','23503','25006','42601','57014'].includes(e.code);send(res,known? (e.code==='23505'||e.message.includes('unavailable')?409:400):500,{error:e.code==='23505'?'This email or request already exists.':known?e.message:'Request failed. Check the server console.'});}
