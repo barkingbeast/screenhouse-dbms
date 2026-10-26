@@ -1,0 +1,11 @@
+BEGIN;
+INSERT INTO customers(name,email) VALUES('Aarav Sharma','aarav@example.com'),('Diya Patel','diya@example.com'),('Kabir Rao','kabir@example.com');
+INSERT INTO movies(title,language,duration_minutes,genre) VALUES('Interstellar','English',169,'Science fiction'),('Dune: Part Two','English',166,'Adventure'),('Vikram','Tamil',175,'Action');
+INSERT INTO theatres(name,city) VALUES('Screenhouse Cinema','Chennai');
+INSERT INTO screens(theatre_id,name) VALUES(1,'Screen 1'),(1,'Screen 2');
+INSERT INTO seats(screen_id,row_label,seat_number) SELECT sc.id,r,n FROM screens sc CROSS JOIN unnest(ARRAY['A','B','C']) r CROSS JOIN generate_series(1,10) n ORDER BY sc.id,r,n;
+INSERT INTO shows(movie_id,screen_id,starts_at,price_paise) VALUES(1,1,now()+interval '1 day',25000),(2,2,now()+interval '1 day 3 hours',30000),(3,1,now()+interval '2 days',20000),(1,2,now()+interval '2 days 3 hours',25000);
+INSERT INTO show_seats(show_id,seat_id,screen_id) SELECT sh.id,s.id,sh.screen_id FROM shows sh JOIN seats s ON s.screen_id=sh.screen_id;
+SELECT book_ticket(1,1,ARRAY(SELECT seat_id FROM show_seats ss JOIN seats s ON s.id=ss.seat_id WHERE ss.show_id=1 AND s.row_label='A' AND s.seat_number IN (4,5)),'seed-1');
+SELECT book_ticket(2,2,ARRAY(SELECT seat_id FROM show_seats ss JOIN seats s ON s.id=ss.seat_id WHERE ss.show_id=2 AND s.row_label='B' AND s.seat_number IN (6,7)),'seed-2');
+COMMIT;

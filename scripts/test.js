@@ -1,0 +1,91 @@
+import assert from 'node:assert/strict';
+import pg from 'pg';
+import {readFile,writeFile} from 'node:fs/promises';
+const testSchema='review_test_'+Date.now();
+const admin=new pg.Pool({connectionString:process.env.DATABASE_URL});
+const pool=new pg.Pool({connectionString:process.env.DATABASE_URL,options:'-c search_path='+testSchema});
+const evidence=[];const check=(name)=>{evidence.push('- PASS: '+name);console.log('PASS: '+name);};
+const clients=[];let customer,show;
+try{
+ await admin.query(`CREATE SCHEMA "${testSchema}"`);
+ for(const f of ['001_schema.sql','002_seed.sql','004_ledger.sql'])await pool.query(await readFile(new URL('../db/'+f,import.meta.url),'utf8'));
+ check('Base schema, seed and ledger migration apply in an isolated test schema');
+ customer=(await pool.query("INSERT INTO customers(name,email) VALUES('Review Test',$1) RETURNING id",[`test-${Date.now()}@example.com`])).rows[0].id;
+ check('Add customer through INSERT RETURNING');
+ const screen=(await pool.query('SELECT id FROM screens ORDER BY id LIMIT 1')).rows[0].id;
+ show=(await pool.query("INSERT INTO shows(movie_id,screen_id,starts_at,price_paise) VALUES(1,$1,now()+interval '5 days',25000) RETURNING id",[screen])).rows[0].id;
+ await pool.query('INSERT INTO show_seats SELECT $1,id,screen_id,NULL FROM seats WHERE screen_id=$2',[show,screen]);
+ const seats=(await pool.query('SELECT seat_id FROM show_seats WHERE show_id=$1 ORDER BY seat_id',[show])).rows.map(x=>x.seat_id);
+ const book=async(ss,key)=> (await pool.query('SELECT book_ticket($1,$2,$3,$4) AS id',[customer,show,ss,key])).rows[0].id;
+ const key='test-'+Date.now();const id=await book(seats.slice(0,2),key);
+ const booking=(await pool.query('SELECT * FROM bookings WHERE id=$1',[id])).rows[0];assert.equal(booking.total_paise,'50000');check('Two-seat booking calculates exact total');
+ assert.equal(await book(seats.slice(0,2),key),id);assert.equal((await pool.query('SELECT count(*) FROM payments WHERE booking_id=$1',[id])).rows[0].count,'1');check('Identical retry returns original ticket and one payment');
+ await assert.rejects(()=>book([seats[2]],key),/different details/);check('Changed payload with same key rejected');
+ await assert.rejects(()=>book([seats[0]],key+'occupied'),/unavailable/);check('Already-booked seat rejected');
+ await assert.rejects(()=>book([seats[3],seats[3]],key+'duplicate'),/Duplicate/);check('Duplicate seats rejected');
+ await assert.rejects(()=>book([99999999],key+'invalid'),/unavailable/);check('Nonexistent or cross-show seat rejected');
+ const a=await pool.connect(),b=await pool.connect();clients.push(a,b);
+ await a.query('BEGIN');
+ await a.query('SELECT book_ticket($1,$2,$3,$4)',[customer,show,[seats[4]],key+'race1']);
+ let completed=false;const loser=b.query('SELECT book_ticket($1,$2,$3,$4)',[customer,show,[seats[4]],key+'race2']).then(()=>({ok:true}),e=>({ok:false,message:e.message})).finally(()=>completed=true);
+ await new Promise(r=>setTimeout(r,150));assert.equal(completed,false);await a.query('COMMIT');const failed=await loser;assert.equal(failed.ok,false);assert.match(failed.message,/unavailable/);check('Two real connections: second booking waits then fails on same seat');
+ await a.query('BEGIN');await a.query('SELECT book_ticket($1,$2,$3,$4)',[customer,show,[seats[5]],key+'rollback']);await a.query('ROLLBACK');
+ assert.equal((await pool.query('SELECT booking_id FROM show_seats WHERE show_id=$1 AND seat_id=$2',[show,seats[5]])).rows[0].booking_id,null);assert.equal((await pool.query('SELECT count(*) FROM bookings WHERE request_key=$1',[key+'rollback'])).rows[0].count,'0');check('Rollback leaves no ticket, allocation, or payment');
+ await pool.query('SELECT cancel_booking($1,$2)',[id,customer]);await pool.query('SELECT cancel_booking($1,$2)',[id,customer]);
+ assert.equal((await pool.query("SELECT count(*) FROM payments WHERE booking_id=$1 AND kind='REFUND'",[id])).rows[0].count,'1');assert.equal((await pool.query('SELECT count(*) FROM booking_seats WHERE booking_id=$1',[id])).rows[0].count,'2');check('Cancellation retry: one refund, ticket history preserved');
+ await book([seats[0]],key+'rebook');check('Released seat can be rebooked');
+ const before=(await pool.query('SELECT booking_id FROM show_seats WHERE show_id=$1 AND seat_id=$2',[show,seats[0]])).rows[0].booking_id;
+ await assert.rejects(()=>pool.query('SELECT cancel_booking($1,$2)',[before,1]),/does not own/);check('Cancellation ownership checked');
+ const foreignSeat=(await pool.query('SELECT id FROM seats WHERE screen_id<>$1 LIMIT 1',[screen])).rows[0].id;
+ await assert.rejects(()=>book([foreignSeat],key+'foreign'),/unavailable/);check('Seat from another screen rejected');
+ const journal=(await pool.query('SELECT t.id FROM ledger_transactions t JOIN payments p ON p.id=t.payment_id WHERE p.booking_id=$1 AND p.kind=\'PAYMENT\'',[id])).rows[0].id;
+ const entries=(await pool.query('SELECT account,debit_paise,credit_paise FROM ledger_journal WHERE transaction_id=$1 ORDER BY account',[journal])).rows;
+ assert.deepEqual(entries.map(e=>[e.account,e.debit_paise,e.credit_paise]),[['DEMO_CASH','50000','0'],['TICKET_SALES','0','50000']]);check('Payment automatically creates exact cash debit and sales credit');
+ const payment=(await pool.query("SELECT id FROM payments WHERE booking_id=$1 AND kind='PAYMENT'",[id])).rows[0].id;
+ assert.equal((await pool.query('SELECT post_payment_journal($1) AS id',[payment])).rows[0].id,journal);check('Posting the same payment again returns the original journal');
+ const refund=(await pool.query("SELECT t.* FROM ledger_transactions t JOIN payments p ON p.id=t.payment_id WHERE p.booking_id=$1 AND p.kind='REFUND'",[id])).rows[0];
+ assert.equal(refund.reverses_id,journal);
+ assert.equal((await pool.query('SELECT count(*) FROM ledger_entries original JOIN ledger_entries reversal ON original.account_id=reversal.account_id WHERE original.transaction_id=$1 AND reversal.transaction_id=$2 AND original.amount_paise=-reversal.amount_paise',[journal,refund.id])).rows[0].count,'2');check('Refund records a new journal reversing both original entries');
+ assert.equal((await pool.query('SELECT count(*) FROM ledger_audit WHERE NOT balanced')).rows[0].count,'0');
+ assert.equal((await pool.query("SELECT count(*) FROM ledger_reconciliation WHERE status<>'OK'")).rows[0].count,'0');check('All seed, payment and refund journals reconcile');
+ await assert.rejects(()=>pool.query('UPDATE ledger_entries SET amount_paise=1 WHERE transaction_id=$1',[journal]),/append-only/);
+ await assert.rejects(()=>pool.query('DELETE FROM ledger_transactions WHERE id=$1',[journal]),/append-only/);
+ await assert.rejects(()=>pool.query('TRUNCATE ledger_entries'),/append-only/);
+ await assert.rejects(()=>pool.query('UPDATE payments SET amount_paise=1 WHERE id=$1',[payment]),/append-only/);check('Journal update/delete/truncate and payment edits are rejected');
+
+ // Owner-only fault injection inside this disposable test schema.
+ await a.query('BEGIN');
+ await a.query('ALTER TABLE payments DISABLE TRIGGER payment_posts_journal');
+ const incompletePayment=(await a.query("INSERT INTO payments(booking_id,kind,amount_paise,reference) VALUES($1,'REFUND',25000,$2) RETURNING id",[before,key+'incomplete'])).rows[0].id;
+ const original=(await a.query("SELECT t.id FROM ledger_transactions t JOIN payments p ON p.id=t.payment_id WHERE p.booking_id=$1 AND p.kind='PAYMENT'",[before])).rows[0].id;
+ const incompleteJournal=(await a.query('INSERT INTO ledger_transactions(payment_id,idempotency_key,reverses_id) VALUES($1,$2,$3) RETURNING id',[incompletePayment,'payment:'+incompletePayment,original])).rows[0].id;
+ await a.query("INSERT INTO ledger_entries(transaction_id,account_id,amount_paise) SELECT $1,id,-25000 FROM ledger_accounts WHERE code='DEMO_CASH'",[incompleteJournal]);
+ await assert.rejects(()=>a.query('COMMIT'),/must balance/);
+ await a.query('ROLLBACK');
+ assert.equal((await pool.query('SELECT count(*) FROM payments WHERE id=$1',[incompletePayment])).rows[0].count,'0');check('Deferred balance check rejects COMMIT and rolls back an incomplete journal plus payment');
+
+ await a.query('BEGIN');
+ await a.query('ALTER TABLE payments DISABLE TRIGGER payment_posts_journal');
+ const wrongPayment=(await a.query("INSERT INTO payments(booking_id,kind,amount_paise,reference) VALUES($1,'REFUND',25000,$2) RETURNING id",[before,key+'wrong-amount'])).rows[0].id;
+ const wrongJournal=(await a.query('INSERT INTO ledger_transactions(payment_id,idempotency_key,reverses_id) VALUES($1,$2,$3) RETURNING id',[wrongPayment,'payment:'+wrongPayment,original])).rows[0].id;
+ await a.query("INSERT INTO ledger_entries(transaction_id,account_id,amount_paise) SELECT $1,id,CASE WHEN code='DEMO_CASH' THEN -1 ELSE 1 END FROM ledger_accounts",[wrongJournal]);
+ await assert.rejects(()=>a.query('COMMIT'),/must balance/);await a.query('ROLLBACK');
+ check('A zero-sum journal with amounts that do not match its payment is rejected');
+
+ await pool.query("CREATE FUNCTION test_ledger_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Injected ledger failure'; END $$");
+ await pool.query('CREATE TRIGGER test_ledger_failure BEFORE INSERT ON ledger_entries FOR EACH ROW EXECUTE FUNCTION test_ledger_failure()');
+ await assert.rejects(()=>book([seats[6]],key+'ledger-fail'),/Injected ledger failure/);
+ assert.equal((await pool.query('SELECT count(*) FROM bookings WHERE request_key=$1',[key+'ledger-fail'])).rows[0].count,'0');
+ assert.equal((await pool.query('SELECT booking_id FROM show_seats WHERE show_id=$1 AND seat_id=$2',[show,seats[6]])).rows[0].booking_id,null);check('Ledger insert failure rolls back the booking, payment and seat allocation');
+ await assert.rejects(()=>pool.query('SELECT cancel_booking($1,$2)',[before,customer]),/Injected ledger failure/);
+ assert.equal((await pool.query('SELECT status FROM bookings WHERE id=$1',[before])).rows[0].status,'CONFIRMED');
+ assert.equal((await pool.query('SELECT booking_id FROM show_seats WHERE show_id=$1 AND seat_id=$2',[show,seats[0]])).rows[0].booking_id,before);check('Ledger failure during cancellation preserves the original booking and seat');
+ await pool.query('DROP TRIGGER test_ledger_failure ON ledger_entries');
+ await pool.query('DROP FUNCTION test_ledger_failure()');
+}finally{
+ for(const c of clients){await c.query('ROLLBACK');c.release();}
+ await pool.end();
+ await admin.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
+ await admin.end();
+ await writeFile(new URL('../docs/TEST_EVIDENCE.md',import.meta.url),'# Test evidence\n\nExecuted: '+new Date().toISOString()+'\n\n'+evidence.join('\n')+'\n\nTests use real PostgreSQL connections in a disposable schema with its own seed data. Fault-injection triggers and every test record are removed by dropping only that schema; public demo data is preserved.\n');
+}

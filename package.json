@@ -1,0 +1,5 @@
+{
+  "name": "screenhouse-dbms", "version": "1.0.0", "private": true, "type": "module",
+  "scripts": {"start":"node --env-file=.env src/server.js","setup":"node --env-file=.env scripts/setup.js","test":"node --env-file=.env scripts/test.js"},
+  "dependencies": {"pg":"8.23.1"}
+}

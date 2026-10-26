@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: cinema
+      POSTGRES_PASSWORD: cinema_local_demo
+      POSTGRES_DB: cinema
+    ports:
+      - "127.0.0.1:5544:5432"
+    volumes:
+      - cinema_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinema -d cinema"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+volumes:
+  cinema_data:
