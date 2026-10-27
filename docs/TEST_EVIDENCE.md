@@ -1,6 +1,6 @@
 # Test evidence
 
-Executed: 2026-10-26T12:48:53.245Z
+Executed: 2026-10-27T06:43:22.310Z
 
 - PASS: Base schema, seed and ledger migration apply in an isolated test schema
 - PASS: Add customer through INSERT RETURNING
@@ -25,5 +25,21 @@ Executed: 2026-10-26T12:48:53.245Z
 - PASS: A zero-sum journal with amounts that do not match its payment is rejected
 - PASS: Ledger insert failure rolls back the booking, payment and seat allocation
 - PASS: Ledger failure during cancellation preserves the original booking and seat
+- PASS: Admin creates and edits a movie
+- PASS: Admin creates category seats automatically and edits a screen
+- PASS: Admin schedules a show with inventory and three category prices
+- PASS: Admin rejects overlapping show times on the same screen
+- PASS: Mixed-category booking totals the server prices and snapshots each seat
+- PASS: Price edits preserve historical ticket values and idempotent retries
+- PASS: New bookings use the revised category prices
+- PASS: Cancellation refunds the original mixed-category total after prices change
+- PASS: Admin cannot delete or reschedule records with booking history
+- PASS: Admin validates scheduled runtimes, price order and exact two-decimal currency
+- PASS: Paused movie or show rejects new bookings
+- PASS: Concurrent admin price update waits for booking; the ticket keeps one consistent price set
+- PASS: Concurrent admin scheduling allows only one overlapping show
+- PASS: Unused shows can move screens and unused movies/screens/shows can be deleted
+- PASS: Maximum supported price works for all three categories
+- PASS: Admin catalog exposes prices and every mixed-price payment/refund reconciles
 
 Tests use real PostgreSQL connections in a disposable schema with its own seed data. Fault-injection triggers and every test record are removed by dropping only that schema; public demo data is preserved.

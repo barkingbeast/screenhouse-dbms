@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import {readFile,writeFile} from 'node:fs/promises';
+import {testAdminPricing} from './admin-pricing-tests.js';
 const testSchema='review_test_'+Date.now();
 const admin=new pg.Pool({connectionString:process.env.DATABASE_URL});
 const pool=new pg.Pool({connectionString:process.env.DATABASE_URL,options:'-c search_path='+testSchema});
@@ -8,7 +9,7 @@ const evidence=[];const check=(name)=>{evidence.push('- PASS: '+name);console.lo
 const clients=[];let customer,show;
 try{
  await admin.query(`CREATE SCHEMA "${testSchema}"`);
- for(const f of ['001_schema.sql','002_seed.sql','004_ledger.sql'])await pool.query(await readFile(new URL('../db/'+f,import.meta.url),'utf8'));
+ for(const f of ['001_schema.sql','002_seed.sql','004_ledger.sql','006_admin_pricing.sql'])await pool.query(await readFile(new URL('../db/'+f,import.meta.url),'utf8'));
  check('Base schema, seed and ledger migration apply in an isolated test schema');
  customer=(await pool.query("INSERT INTO customers(name,email) VALUES('Review Test',$1) RETURNING id",[`test-${Date.now()}@example.com`])).rows[0].id;
  check('Add customer through INSERT RETURNING');
@@ -82,6 +83,7 @@ try{
  assert.equal((await pool.query('SELECT booking_id FROM show_seats WHERE show_id=$1 AND seat_id=$2',[show,seats[0]])).rows[0].booking_id,before);check('Ledger failure during cancellation preserves the original booking and seat');
  await pool.query('DROP TRIGGER test_ledger_failure ON ledger_entries');
  await pool.query('DROP FUNCTION test_ledger_failure()');
+ await testAdminPricing(pool,customer,check);
 }finally{
  for(const c of clients){await c.query('ROLLBACK');c.release();}
  await pool.end();

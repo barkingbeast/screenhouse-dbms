@@ -1,0 +1,66 @@
+import assert from 'node:assert/strict';
+import {saveMovie,saveScreen,saveShow,deleteEntity,catalog,rupees} from '../src/admin.js';
+export async function testAdminPricing(pool,customer,check){
+ const movieInput={title:'Review Feature',language:'English',duration_minutes:110,genre:'Drama',is_active:true};
+ const movie=await saveMovie(pool,movieInput);
+ await saveMovie(pool,{...movieInput,title:'Review Feature Updated'},movie.id);
+ assert.equal((await pool.query('SELECT title FROM movies WHERE id=$1',[movie.id])).rows[0].title,'Review Feature Updated');check('Admin creates and edits a movie');
+ const screen=await saveScreen(pool,{name:'Feature Test Screen',theatre_id:1,seats_per_row:4});
+ const inventory=(await pool.query('SELECT s.*,c.code FROM seats s JOIN seat_categories c ON c.id=s.category_id WHERE s.screen_id=$1 ORDER BY s.row_label,s.seat_number',[screen.id])).rows;
+ assert.equal(inventory.length,12);assert.deepEqual([...new Set(inventory.map(s=>s.code))],['STANDARD','PREMIUM','RECLINER']);
+ await saveScreen(pool,{name:'Feature Test Screen Updated',theatre_id:1},screen.id);check('Admin creates category seats automatically and edits a screen');
+ const input={movie_id:movie.id,screen_id:screen.id,starts_at:new Date(Date.now()+6*86400000).toISOString(),standard_price:'100',premium_price:'200',recliner_price:'350',is_active:true};
+ const show=await saveShow(pool,input);
+ assert.equal((await pool.query('SELECT count(*) FROM show_seats WHERE show_id=$1',[show.id])).rows[0].count,'12');check('Admin schedules a show with inventory and three category prices');
+ await assert.rejects(()=>saveShow(pool,input),/overlaps/);check('Admin rejects overlapping show times on the same screen');
+ const selected=[inventory[0].id,inventory[4].id,inventory[8].id];
+ const key='category-test-'+Date.now();
+ const book=async(seats,k)=>(await pool.query('SELECT book_ticket($1,$2,$3,$4) AS id',[customer,show.id,seats,k])).rows[0].id;
+ const bid=await book(selected,key);
+ assert.equal((await pool.query('SELECT total_paise FROM bookings WHERE id=$1',[bid])).rows[0].total_paise,'65000');
+ const snapshot=(await pool.query('SELECT category_name,price_paise FROM booking_seats WHERE booking_id=$1 ORDER BY price_paise',[bid])).rows;
+ assert.deepEqual(snapshot,[{category_name:'Standard',price_paise:'10000'},{category_name:'Premium',price_paise:'20000'},{category_name:'Recliner',price_paise:'35000'}]);check('Mixed-category booking totals the server prices and snapshots each seat');
+ const revised={...input,standard_price:'150',premium_price:'250',recliner_price:'400'};
+ await saveShow(pool,revised,show.id);
+ assert.deepEqual((await pool.query('SELECT category_name,price_paise FROM booking_seats WHERE booking_id=$1 ORDER BY price_paise',[bid])).rows,snapshot);
+ assert.equal((await pool.query('SELECT total_paise FROM bookings WHERE id=$1',[bid])).rows[0].total_paise,'65000');
+ assert.equal(await book(selected,key),bid);check('Price edits preserve historical ticket values and idempotent retries');
+ const bid2=await book([inventory[1].id,inventory[5].id],key+'new');
+ assert.equal((await pool.query('SELECT total_paise FROM bookings WHERE id=$1',[bid2])).rows[0].total_paise,'40000');check('New bookings use the revised category prices');
+ await pool.query('SELECT cancel_booking($1,$2)',[bid,customer]);
+ assert.equal((await pool.query("SELECT amount_paise FROM payments WHERE booking_id=$1 AND kind='REFUND'",[bid])).rows[0].amount_paise,'65000');check('Cancellation refunds the original mixed-category total after prices change');
+ for(const [kind,id] of [['shows',show.id],['screens',screen.id],['movies',movie.id]])await assert.rejects(()=>deleteEntity(pool,kind,id),/history|has shows/);
+ await assert.rejects(()=>saveShow(pool,{...revised,starts_at:new Date(Date.now()+7*86400000).toISOString()},show.id),/ticket history/);check('Admin cannot delete or reschedule records with booking history');
+ await assert.rejects(()=>saveMovie(pool,{...movieInput,duration_minutes:140},movie.id),/Runtime/);
+ await assert.rejects(()=>saveShow(pool,{...revised,premium_price:'10'},show.id),/Standard/);
+ assert.throws(()=>rupees('1.234'),/two decimal/);assert.equal(rupees('100.25'),10025);check('Admin validates scheduled runtimes, price order and exact two-decimal currency');
+ await saveShow(pool,{...revised,is_active:false},show.id);
+ await assert.rejects(()=>book([inventory[2].id],key+'paused'),/not open/);
+ await saveShow(pool,revised,show.id);
+ await saveMovie(pool,{...movieInput,is_active:false},movie.id);
+ await assert.rejects(()=>book([inventory[2].id],key+'movie-paused'),/not open/);
+ await saveMovie(pool,movieInput,movie.id);check('Paused movie or show rejects new bookings');
+
+ const c=await pool.connect();let update;
+ try{await c.query('BEGIN');await c.query('SELECT id FROM shows WHERE id=$1 FOR UPDATE',[show.id]);
+ let finished=false;update=saveShow(pool,{...revised,standard_price:'200',premium_price:'300',recliner_price:'450'},show.id).finally(()=>finished=true);
+ await new Promise(r=>setTimeout(r,100));assert.equal(finished,false);
+ const concurrent=(await c.query('SELECT book_ticket($1,$2,$3,$4) AS id',[customer,show.id,[inventory[2].id,inventory[9].id],key+'concurrent'])).rows[0].id;
+ await c.query('COMMIT');await update;
+ assert.equal((await pool.query('SELECT total_paise FROM bookings WHERE id=$1',[concurrent])).rows[0].total_paise,'55000');check('Concurrent admin price update waits for booking; the ticket keeps one consistent price set');
+ }finally{await c.query('ROLLBACK');c.release();}
+
+ const races=await Promise.allSettled([saveShow(pool,{...input,starts_at:new Date(Date.now()+8*86400000).toISOString()}),saveShow(pool,{...input,starts_at:new Date(Date.now()+8*86400000).toISOString()})]);
+ assert.equal(races.filter(x=>x.status==='fulfilled').length,1);check('Concurrent admin scheduling allows only one overlapping show');
+ const unused=races.find(x=>x.status==='fulfilled').value;
+ const other=await saveScreen(pool,{name:'Temporary Move Screen',theatre_id:1,seats_per_row:5});
+ await saveShow(pool,{...input,starts_at:new Date(unused.starts_at).toISOString(),screen_id:other.id},unused.id);
+ assert.equal((await pool.query('SELECT count(*) FROM show_seats WHERE show_id=$1',[unused.id])).rows[0].count,'15');
+ await deleteEntity(pool,'shows',unused.id);await deleteEntity(pool,'screens',other.id);
+ const disposable=await saveMovie(pool,{...movieInput,title:'Disposable Movie'});await deleteEntity(pool,'movies',disposable.id);check('Unused shows can move screens and unused movies/screens/shows can be deleted');
+ const highest=await saveShow(pool,{...input,starts_at:new Date(Date.now()+10*86400000).toISOString(),standard_price:'100000',premium_price:'100000',recliner_price:'100000'});
+ assert.equal((await pool.query('SELECT count(*) FROM show_prices WHERE show_id=$1 AND price_paise=10000000',[highest.id])).rows[0].count,'3');await deleteEntity(pool,'shows',highest.id);check('Maximum supported price works for all three categories');
+ assert.equal((await pool.query('SELECT count(*) FROM ledger_audit WHERE NOT balanced')).rows[0].count,'0');
+ assert.equal((await pool.query("SELECT count(*) FROM ledger_reconciliation WHERE status<>'OK'")).rows[0].count,'0');
+ const all=await catalog(pool);assert.ok(all.shows.find(s=>s.id===show.id)?.prices.RECLINER);check('Admin catalog exposes prices and every mixed-price payment/refund reconciles');
+}

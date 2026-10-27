@@ -7,3 +7,5 @@ Palette: midnight #101A26, raised navy #162230, ivory #F3ECDF, champagne #DFBC80
 Layout: left-aligned editorial hero balanced by a film-art panel; horizontal shows above an asymmetrical auditorium/checkout workspace. No ornamental dashboard metrics. Ticket cutouts and perforations are the distinctive physical motif. Mobile stacks the artwork, seats, and checkout, preserving all review tools. Focus rings, seat labels, selected state, disabled booked state, navigation current state, and reduced-motion support are retained. Booking confirmation remains server-confirmed; no optimistic ticket claims.
 
 Fonts obtained from Google Fonts: Outfit and Prata, with license files bundled under public/fonts. No runtime network dependency for typography.
+
+Admin extension: the same Midnight Premiere palette and typography now cover an editor/register workspace with Movies, Screens, and Shows & pricing tabs. Category legends and an itemized ticket preview make price differences explicit. Layouts adapt to 4–12 seats per row; narrow screens scroll only inside the seat map and keep 44px seat targets. Five top-level navigation destinations wrap on mobile.

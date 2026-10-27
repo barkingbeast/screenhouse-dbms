@@ -2,6 +2,8 @@
 
 The ledger extension is now implemented. After practising the core booking flow, read [LEDGER_VIVA.md](LEDGER_VIVA.md) for a short explanation of balanced postings, automatic payment integration, refund reversals and the audit queries.
 
+Movie/screen/show administration and seat categories are also implemented. Read [ADMIN_PRICING_VIVA.md](ADMIN_PRICING_VIVA.md) to demonstrate management forms, mixed-category tickets, historical price preservation, and refund correctness.
+
 ## Explain the integration in 30 seconds
 
 “The interface is HTML, CSS, and browser JavaScript. A form sends a JSON HTTP request using fetch. A Node.js server handles the API request. The pg library connects to PostgreSQL through a connection pool. It runs SQL with parameters and returns the database rows as JSON. The browser displays the result. All customers, bookings, seats, and payments are stored in PostgreSQL.”
